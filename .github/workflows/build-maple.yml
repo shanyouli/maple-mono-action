@@ -1,0 +1,138 @@
+# 从上游 subframe7536/maple-font 的 variable 分支（V8 开发版）构建自定义 Maple Mono
+#
+# 产物组合（--width narrow 全局生效）：
+#   1. Maple Mono          纯拉丁静态 ttf（8 字重 x 直/斜体）
+#   2. Maple Mono 可变     纯拉丁可变字体（单文件全字重，默认总是构建）
+#   3. Maple Mono NF       + Nerd Font 图标
+#   4. Maple Mono CN       + 简体中文（无图标，来自 --cjk-both）
+#   5. Maple Mono NF CN    + 简体中文 + 图标
+#   6. Maple Mono CN 可变  中文可变字体（第二次构建 --cjk-variable 产出）
+#
+# 其它已选配置：
+#   --format ttf     仅输出 ttf（可变 base 除外）
+#   --line-height 0.886  行高对齐 LXGW WenKai Mono（1.170em vs 默认 1.32em）
+#   --feat cv02,...   冻结 Playground 实测选定的字形与连字特性
+#   中文默认 2:1 宽度、保留全部连字与 [TODO] 标签连字、Maple 个性化字形
+
+name: Build Maple Mono
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '上游 commit 未变化时也强制重建'
+        type: boolean
+        default: false
+  schedule:
+    # 每周一 03:00 UTC（北京时间 11:00）
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-maple-mono
+  cancel-in-progress: false
+
+env:
+  # 公共构建参数：4 种组合 + 仅 ttf + narrow 宽度 + 行高对齐 LXGW WenKai + Playground 选定的特性冻结
+  BUILD_ARGS: >-
+    --cjk cn --cjk-both --nf
+    --width narrow
+    --format ttf
+    --line-height 0.886
+    --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout upstream maple-font (variable branch)
+        uses: actions/checkout@v6
+        with:
+          repository: subframe7536/maple-font
+          ref: variable
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve build metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="$(git rev-parse --short HEAD)"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=v8-${SHA}" >> "$GITHUB_OUTPUT"
+          # 定时任务下，上游 commit 未变化则跳过，避免无意义构建
+          SKIP=false
+          if [ "${{ inputs.force }}" != "true" ] \
+            && gh release view "v8-${SHA}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            SKIP=true
+            echo "Release v8-${SHA} already exists, skip build."
+          fi
+          echo "skip=${SKIP}" >> "$GITHUB_OUTPUT"
+
+      # 第一次构建：静态输出（base / NF / CN / NF-CN 静态包 + base 可变包）
+      - name: Build static fonts
+        if: steps.meta.outputs.skip != 'true'
+        run: |
+          python build.py ${{ env.BUILD_ARGS }} --archive
+          mkdir -p dist/static
+          mv fonts/archive/*.zip dist/static/
+
+      # 第二次构建：CJK 输出为可变字体（--cache 复用第一次的拉丁基础产物）
+      - name: Build variable CJK fonts
+        if: steps.meta.outputs.skip != 'true'
+        run: |
+          python build.py ${{ env.BUILD_ARGS }} --cjk-variable --archive --cache
+          mkdir -p dist/variable
+          mv fonts/archive/*.zip dist/variable/
+
+      - name: Upload artifacts
+        if: steps.meta.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: maple-mono-v8-${{ steps.meta.outputs.sha }}
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create release
+        if: steps.meta.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## Maple Mono 自定义构建"
+            echo
+            echo "- 上游: [subframe7536/maple-font](https://github.com/subframe7536/maple-font) \`variable\` 分支 @ ${{ steps.meta.outputs.sha }}"
+            echo
+            echo "### 构建参数"
+            echo '```'
+            echo "python build.py ${{ env.BUILD_ARGS }} --archive"
+            echo "python build.py ${{ env.BUILD_ARGS }} --cjk-variable --archive --cache"
+            echo '```'
+            echo
+            echo "### 最终生效配置"
+            echo '```'
+            python build.py ${{ env.BUILD_ARGS }} --dry
+            echo '```'
+            echo
+            echo "> static/ 为静态字体包，variable/ 为中文可变字体包；压缩包内含对应 config 与 license。"
+          } > NOTES
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            dist/static/*.zip dist/variable/*.zip \
+            --title "Maple Mono v8-${{ steps.meta.outputs.sha }}" \
+            --notes-file NOTES \
+            -R "${{ github.repository }}"
