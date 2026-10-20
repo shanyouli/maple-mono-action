@@ -16,8 +16,10 @@
 ## 构建配置
 
 ```
-python build.py --cjk cn --cjk-both --nf --nf-mono --nf-variable --legacy-thin-weight-class --width narrow --format ttf --line-height 0.886 --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11 --archive
-python build.py --cjk cn --cjk-both --nf --nf-mono --nf-variable --legacy-thin-weight-class --width narrow --format ttf --line-height 0.886 --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11 --cjk-variable --archive --cache
+# 第一遍：静态输出（含静态 NF 8×2，为静态 NF-CN 合并提供 base；上游要求 NF 可变必须与 CJK 可变同遍，故 --nf-variable 只能在第二遍）
+python build.py --cjk cn --cjk-both --nf --nf-mono --legacy-thin-weight-class --width narrow --format ttf --line-height 0.886 --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11 --archive
+# 第二遍：可变输出（NF 可变 + 中文可变；--cache 复用第一遍产物）
+python build.py --cjk cn --cjk-both --nf --nf-mono --legacy-thin-weight-class --width narrow --format ttf --line-height 0.886 --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11 --nf-variable --cjk-variable --archive --cache
 ```
 
 | 配置 | 选择 | 说明 |
@@ -25,7 +27,8 @@ python build.py --cjk cn --cjk-both --nf --nf-mono --nf-variable --legacy-thin-w
 | `--width narrow` | ✅ | 字形宽度 550（默认 600） |
 | `--nf` | ✅ | Nerd Font 图标（默认已开启，显式声明） |
 | `--nf-mono` | ✅ | NF 图标强制单宽（默认图标宽度约 1.6–1.8 cell），终端列对齐更稳 |
-| `--nf-variable` | ✅ | NF 以可变字体输出，替代「8 字重 × 2」的静态组合 |
+| `--nf-variable` | ✅ | NF 以可变字体输出，替代「8 字重 × 2」的静态组合（仅第二遍） |
+| 字体名 patch | ✅ | workflow 移除 family 名中的 NR 后缀：保留 narrow(550) 宽度，但字体名为 Maple Mono / NF / CN / NF CN |
 | `--legacy-thin-weight-class` | ✅ | Thin/ExtraLight 用 250/275 老式 weightClass，规避 Windows JetBrains IDE 的 GDI 假粗 |
 | `--cjk cn` | ✅ | 简体中文版（含常用繁中/日文区段） |
 | `--cjk-both` | ✅ | 同时产出 CN 无图标版 + NF CN 有图标版 |

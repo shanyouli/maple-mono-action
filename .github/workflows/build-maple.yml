@@ -19,6 +19,7 @@
 #   中文默认 2:1 宽度、保留全部连字与 [TODO] 标签连字、Maple 个性化字形
 #   中文 auto-hint（--cjk-hinted）保持上游默认关闭：只在低 DPI + Windows GDI 小字号有收益，
 #   高 DPI 下反而带来形变，且显著拉长构建时间。
+#   字体名经 patch 去除 NR 后缀：保留 narrow(550) 宽度但命名为 Maple Mono / NF / CN / NF CN
 
 name: 🍁 Build Maple Mono
 
@@ -43,13 +44,17 @@ concurrency:
 env:
   UPSTREAM_REPO: subframe7536/maple-font
   # 公共构建参数：4 种组合 + 仅 ttf + narrow 宽度 + 行高对齐 LXGW WenKai + Playground 选定的特性冻结
+  # 注：--nf-variable 只能放在第二遍（上游要求 NF 可变必须与 cjk.variable 同遍）
   BUILD_ARGS: >-
-    --cjk cn --cjk-both --nf --nf-mono --nf-variable
+    --cjk cn --cjk-both --nf --nf-mono
     --legacy-thin-weight-class
     --width narrow
     --format ttf
     --line-height 0.886
     --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11
+  # 第二遍（可变输出）附加参数：NF 可变 + CJK 可变
+  VAR_ARGS: >-
+    --nf-variable --cjk-variable
 
 jobs:
   build:
@@ -63,6 +68,24 @@ jobs:
           ref: variable
           fetch-depth: 1
           persist-credentials: false
+
+      # 去掉 family 名中的 NR 后缀：保留 narrow(550) 宽度，但字体名为 Maple Mono / NF / CN / NF CN
+      # 若上游重构导致 patch 目标变化，此步骤会 assert 失败以及时提醒更新
+      - name: "🩹 Patch family name (drop NR suffix)"
+        run: |
+          python3 - << 'PY'
+          from pathlib import Path
+          p = Path("scripts/config/resolver.py")
+          src = p.read_text(encoding="utf-8")
+          old = """
+              width_name = config.get_width_name()
+              if width_name:
+                  name_parts.append(width_name)
+          """
+          assert src.count(old) == 1, f"patch target not found or not unique in resolver.py (count={src.count(old)})"
+          p.write_text(src.replace(old, ""), encoding="utf-8")
+          print("patched: NR suffix removed from family name")
+          PY
 
       - name: 🐍 Setup Python
         uses: actions/setup-python@v6
@@ -151,7 +174,7 @@ jobs:
         if: steps.meta.outputs.skip != 'true'
         run: |
           echo "::group::🔨 python build.py (variable CJK pass)"
-          python build.py ${{ env.BUILD_ARGS }} --cjk-variable --archive --cache
+          python build.py ${{ env.BUILD_ARGS }} ${{ env.VAR_ARGS }} --archive --cache
           echo "::endgroup::"
           echo "::group::🗂️ Collect variable archives"
           mkdir -p dist/variable
@@ -197,7 +220,7 @@ jobs:
             echo
             echo '```bash'
             echo "python build.py ${{ env.BUILD_ARGS }} --archive"
-            echo "python build.py ${{ env.BUILD_ARGS }} --cjk-variable --archive --cache"
+            echo "python build.py ${{ env.BUILD_ARGS }} ${{ env.VAR_ARGS }} --archive --cache"
             echo '```'
             echo
             echo "</details>"
@@ -254,7 +277,7 @@ jobs:
             echo
             echo '```bash'
             echo "python build.py ${{ env.BUILD_ARGS }} --archive"
-            echo "python build.py ${{ env.BUILD_ARGS }} --cjk-variable --archive --cache"
+            echo "python build.py ${{ env.BUILD_ARGS }} ${{ env.VAR_ARGS }} --archive --cache"
             echo '```'
             echo
             echo "</details>"
