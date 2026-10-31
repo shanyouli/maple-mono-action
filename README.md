@@ -22,13 +22,17 @@ python build.py --cjk cn --cjk-both --nf --nf-mono --legacy-thin-weight-class --
 python build.py --cjk cn --cjk-both --nf --nf-mono --legacy-thin-weight-class --width narrow --format ttf --line-height 0.886 --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11 --nf-variable --cjk-variable --archive --cache
 ```
 
+> 本地复现时：先把 workflow 里「🩹 Runtime patch」步骤写入的 `.patch/sitecustomize.py` 落盘，
+> 然后以 `PYTHONPATH=$PWD/.patch MAPLE_NR_PATCH=1 python build.py ...` 运行，
+> 否则窄体字体名会带有 `NR` 后缀（宽度仍为 550）。
+
 | 配置 | 选择 | 说明 |
 |---|---|---|
 | `--width narrow` | ✅ | 字形宽度 550（默认 600） |
 | `--nf` | ✅ | Nerd Font 图标（默认已开启，显式声明） |
 | `--nf-mono` | ✅ | NF 图标强制单宽（默认图标宽度约 1.6–1.8 cell），终端列对齐更稳 |
 | `--nf-variable` | ✅ | NF 以可变字体输出，替代「8 字重 × 2」的静态组合（仅第二遍） |
-| 字体名 patch | ✅ | workflow 移除 family 名中的 NR 后缀：保留 narrow(550) 宽度，但字体名为 Maple Mono / NF / CN / NF CN |
+| 字体名补丁 | ✅ | 构建期运行时补丁（不改上游源码）去掉 family 名中的 NR 后缀：保留 narrow(550) 宽度，但字体名为 Maple Mono / NF / CN / NF CN |
 | `--legacy-thin-weight-class` | ✅ | Thin/ExtraLight 用 250/275 老式 weightClass，规避 Windows JetBrains IDE 的 GDI 假粗 |
 | `--cjk cn` | ✅ | 简体中文版（含常用繁中/日文区段） |
 | `--cjk-both` | ✅ | 同时产出 CN 无图标版 + NF CN 有图标版 |

@@ -19,7 +19,7 @@
 #   中文默认 2:1 宽度、保留全部连字与 [TODO] 标签连字、Maple 个性化字形
 #   中文 auto-hint（--cjk-hinted）保持上游默认关闭：只在低 DPI + Windows GDI 小字号有收益，
 #   高 DPI 下反而带来形变，且显著拉长构建时间。
-#   字体名经 patch 去除 NR 后缀：保留 narrow(550) 宽度但命名为 Maple Mono / NF / CN / NF CN
+#   字体名经运行时补丁去除 NR 后缀（不改上游文件）：保留 narrow(550) 宽度但命名为 Maple Mono / NF / CN / NF CN
 
 name: 🍁 Build Maple Mono
 
@@ -43,6 +43,9 @@ concurrency:
 
 env:
   UPSTREAM_REPO: subframe7536/maple-font
+  # 运行时补丁目录（由「🩹 Runtime patch」步骤生成）。
+  # 补丁自带开关判断，只有显式设置 MAPLE_NR_PATCH=1 的步骤才会生效（pip 等进程不受影响）。
+  PYTHONPATH: ${{ github.workspace }}/.patch
   # 公共构建参数：4 种组合 + 仅 ttf + narrow 宽度 + 行高对齐 LXGW WenKai + Playground 选定的特性冻结
   # 注：--nf-variable 只能放在第二遍（上游要求 NF 可变必须与 cjk.variable 同遍）
   BUILD_ARGS: >-
@@ -70,21 +73,57 @@ jobs:
           persist-credentials: false
 
       # 去掉 family 名中的 NR 后缀：保留 narrow(550) 宽度，但字体名为 Maple Mono / NF / CN / NF CN
-      # 若上游重构导致 patch 目标变化，此步骤会 assert 失败以及时提醒更新
-      - name: "🩹 Patch family name (drop NR suffix)"
+      # 做法是运行时给 BuildConfigResolver._apply_identity 包一层，不改上游任何文件：
+      #   family 名在解析期就已干净，因此 name 表 / fvar 实例名 / 输出文件名 / 包内 config.json 天然一致。
+      # 只依赖方法名与 identity 字段，不依赖上游语句顺序与缩进；上游若重构该方法会立即失败提醒更新。
+      # 注意：不能把 get_width_name() 打成返回 None —— 它同时决定字形宽度（550 vs 600）。
+      - name: "🩹 Runtime patch (drop NR suffix)"
         run: |
-          python3 - << 'PY'
-          from pathlib import Path
-          p = Path("scripts/config/resolver.py")
-          src = p.read_text(encoding="utf-8")
-          old = """
-              width_name = config.get_width_name()
-              if width_name:
-                  name_parts.append(width_name)
+          mkdir -p .patch
+          cat > .patch/sitecustomize.py << 'PY'
+          """构建期运行时补丁：去掉窄体家族名里的 NR 后缀，同时保留 narrow(550) 宽度。
+
+          由 .github/workflows/build-maple.yml 生成，只在 MAPLE_NR_PATCH=1 的步骤里生效，
+          因此 pip 等其它 Python 进程完全不受影响。依赖上游 scripts.config.resolver 的内部结构。
           """
-          assert src.count(old) == 1, f"patch target not found or not unique in resolver.py (count={src.count(old)})"
-          p.write_text(src.replace(old, ""), encoding="utf-8")
-          print("patched: NR suffix removed from family name")
+          import os
+          import sys
+
+          if os.environ.get("MAPLE_NR_PATCH") == "1":
+              root = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
+              if os.path.isfile(os.path.join(root, "build.py")) and root not in sys.path:
+                  sys.path.insert(0, root)
+
+              try:
+                  from scripts.config.resolver import BuildConfigResolver
+              except Exception as error:  # 上游重构后导入失败必须让构建失败，而不是静默产出带 NR 的字体
+                  raise SystemExit(f"[nr-patch] 无法导入上游 resolver，需更新补丁: {error}")
+
+              if not hasattr(BuildConfigResolver, "_apply_identity"):
+                  raise SystemExit(
+                      "[nr-patch] 上游已无 BuildConfigResolver._apply_identity，需更新补丁"
+                  )
+
+              if not getattr(BuildConfigResolver, "_nr_suffix_stripped", False):
+                  _orig_apply_identity = BuildConfigResolver._apply_identity
+
+                  def _apply_identity(self, config):
+                      _orig_apply_identity(self, config)
+                      family_name = config.identity.family_name
+                      if config.feature.width in ("narrow", "slim") and " NR" not in family_name:
+                          # 上游不再追加后缀时触发：说明补丁已过期，应当删除该步骤
+                          raise SystemExit(
+                              "[nr-patch] 上游未再追加 NR 后缀，本补丁已过期，请移除该步骤 "
+                              f"(width={config.feature.width}, family={family_name})"
+                          )
+                      config.identity.family_name = family_name.replace(" NR", "")
+                      config.identity.family_name_compact = (
+                          config.identity.family_name_compact.replace("NR", "")
+                      )
+
+                  BuildConfigResolver._apply_identity = _apply_identity
+                  BuildConfigResolver._nr_suffix_stripped = True
+                  print("[nr-patch] 已在运行时去除 family name 的 NR 后缀", file=sys.stderr)
           PY
 
       - name: 🐍 Setup Python
@@ -157,6 +196,8 @@ jobs:
       # ::group:: 折叠构建脚本的全部输出（含 CJK 基础字体的下载日志）
       - name: 🏗️ Build static fonts
         if: steps.meta.outputs.skip != 'true'
+        env:
+          MAPLE_NR_PATCH: '1'
         run: |
           echo "::group::🔨 python build.py (static pass)"
           python build.py ${{ env.BUILD_ARGS }} --archive
@@ -172,6 +213,8 @@ jobs:
       # 同名 zip 必须跳过，否则 gh release create 会因 ReleaseAsset.name 重复报 422
       - name: 🧩 Build variable CJK fonts
         if: steps.meta.outputs.skip != 'true'
+        env:
+          MAPLE_NR_PATCH: '1'
         run: |
           echo "::group::🔨 python build.py (variable CJK pass)"
           python build.py ${{ env.BUILD_ARGS }} ${{ env.VAR_ARGS }} --archive --cache
@@ -252,6 +295,7 @@ jobs:
         if: steps.meta.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          MAPLE_NR_PATCH: '1'
         run: |
           echo "::group::🔍 Resolve effective config (build.py --dry)"
           python build.py ${{ env.BUILD_ARGS }} --dry | tee dry-config.txt
