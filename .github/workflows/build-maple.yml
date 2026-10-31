@@ -31,8 +31,8 @@ on:
         type: boolean
         default: false
   schedule:
-    # 每周一 03:00 UTC（北京时间 11:00）
-    - cron: '0 3 * * 1'
+    # 每周六 01:00 北京时间（周五 17:00 UTC）
+    - cron: '0 17 * * 5'
 
 permissions:
   contents: write

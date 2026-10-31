@@ -6,7 +6,7 @@
 
 1. 将本仓库推送到你的 GitHub 仓库。
 2. 进入仓库 **Actions** 页面，若提示禁用则先启用 workflows。
-3. 选择 **🍁 Build Maple Mono** → **Run workflow** 手动触发；或等待每周一 11:00（北京时间）定时构建。
+3. 选择 **🍁 Build Maple Mono** → **Run workflow** 手动触发；或等待每周六 01:00（北京时间）定时构建。
 4. 构建完成后：
    - **Actions → 该次运行 → Artifacts** 下载（保留 30 天）；
    - 或 **Releases** 页面下载 `v8-<上游短SHA>` 版本（永久保留，可追溯到上游源码 commit）。
