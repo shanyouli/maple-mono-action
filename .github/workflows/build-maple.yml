@@ -124,6 +124,118 @@ jobs:
                   BuildConfigResolver._apply_identity = _apply_identity
                   BuildConfigResolver._nr_suffix_stripped = True
                   print("[nr-patch] 已在运行时去除 family name 的 NR 后缀", file=sys.stderr)
+
+              # —— CJK 兼容映射补丁 ——
+              # Emacs (macfont 后端) 对 script 'han 的字体匹配要求 charset 为 fontset.el 中
+              # 代表字的超集（U+3410/U+4E10/U+5B57/U+FE30/U+F900，五字全中）。
+              # 上游 CN 构建的 cmap 缺 U+F900（CJK 兼容表意文字，Unicode 定义它与 U+4E92「互」统一），
+              # 导致 find-font (:script 'han) 对任何中文字体都返回 nil、fontset 回退异常。
+              # 在归档前将 U+F900 映射到与 U+4E92 相同的字形（不新增轮廓，仅 cmap 条目）。
+              # 拦截点为 MapleBuildPipeline.archive_outputs：ttf 在 fonts/ 下生成后、打包成 zip 前。
+              # 幂等：已含 U+F900 的字体跳过；--cache 复用产物时同样生效。
+              try:
+                  from scripts.pipeline.orchestrator import MapleBuildPipeline
+              except Exception as error:
+                  raise SystemExit(
+                      f"[cjk-compat] 无法导入上游 orchestrator，需更新补丁: {error}"
+                  )
+
+              if not hasattr(MapleBuildPipeline, "archive_outputs"):
+                  raise SystemExit(
+                      "[cjk-compat] 上游已无 MapleBuildPipeline.archive_outputs，需更新补丁"
+                  )
+
+              if not getattr(MapleBuildPipeline, "_cjk_compat_patched", False):
+                  def _patch_cjk_compat_fonts(output_dir):
+                      """先探测后补丁：仅当字体缺失代表字且可补时才修改。
+
+                      上游版本更新若自行补全（无论补 cmap 还是其它机制使代表字
+                      覆盖满足），此处自动退化为 no-op，不会干扰上游修复。
+                      """
+                      from pathlib import Path
+                      from fontTools.ttLib import TTFont
+
+                      representatives = (0x3410, 0x4E10, 0x5B57, 0xFE30, 0xF900)
+                      compat = 0xF900
+                      same_as = 0x4E92  # 互
+                      standard_subtables = ((0, 3), (0, 4), (3, 1), (3, 10))
+                      patched, already_ok, unfixable = 0, 0, []
+                      for path in Path(output_dir).rglob("*.ttf"):
+                          # 只处理 CN 家族（静态 MapleMono-CN/NFM-CN-* 与可变 *[wght].ttf）
+                          if "CN" not in path.stem:
+                              continue
+                          font = TTFont(str(path))
+                          try:
+                              best = font.getBestCmap()
+                              missing = [c for c in representatives if c not in best]
+                              if not missing:
+                                  # 上游已支持：不做任何修改
+                                  already_ok += 1
+                                  continue
+                              if compat in missing and same_as not in best:
+                                  # 无法补齐（缺同形参照）：不阻断构建，待上游修复
+                                  unfixable.append(path.name)
+                                  continue
+                              glyph = best[same_as]
+                              touched = []
+                              for st in font["cmap"].tables:
+                                  if (st.platformID, st.platEncID) in standard_subtables \
+                                          and compat not in st.cmap:
+                                      st.cmap[compat] = glyph
+                                      touched.append(
+                                          (st.platformID, st.platEncID, st.format)
+                                      )
+                              # 自检（内存对象即最终落盘内容）
+                              best_after = font.getBestCmap()
+                              still_missing = [
+                                  c for c in representatives if c not in best_after
+                              ]
+                              if still_missing:
+                                  raise SystemExit(
+                                      "[cjk-compat] 自检失败: "
+                                      + ", ".join(
+                                          f"U+{c:04X}" for c in still_missing
+                                      )
+                                  )
+                              font.save(str(path))
+                              patched += 1
+                              print(
+                                  f"[cjk-compat] {path.name}: "
+                                  f"cmap[U+F900] -> {glyph!r} on {touched}",
+                                  file=sys.stderr,
+                              )
+                          finally:
+                              font.close()
+                      if already_ok:
+                          print(
+                              f"[cjk-compat] {already_ok} 个 CN 字体已覆盖全部代表字"
+                              "（上游已修复），跳过",
+                              file=sys.stderr,
+                          )
+                      for name in unfixable:
+                          print(
+                              f"[cjk-compat] 警告: {name} 缺同形参照 U+{same_as:04X}，"
+                              "无法补 U+F900，已跳过（待上游版本修复）",
+                              file=sys.stderr,
+                          )
+                      if patched:
+                          print(
+                              f"[cjk-compat] 归档前已为 {patched} 个 CN 字体补 U+F900",
+                              file=sys.stderr,
+                          )
+
+                  _orig_archive_outputs = MapleBuildPipeline.archive_outputs
+
+                  def _archive_with_cjk_compat(self):
+                      _patch_cjk_compat_fonts(self.runtime_context.output_dir)
+                      _orig_archive_outputs(self)
+
+                  MapleBuildPipeline.archive_outputs = _archive_with_cjk_compat
+                  MapleBuildPipeline._cjk_compat_patched = True
+                  print(
+                      "[cjk-compat] 已挂接归档钩子：归档前为 CN 字体补 U+F900",
+                      file=sys.stderr,
+                  )
           PY
 
       - name: 🐍 Setup Python
@@ -194,6 +306,7 @@ jobs:
 
       # 第一次构建：静态输出（base / CN 静态包 + NF 可变包 + base 可变包）
       # ::group:: 折叠构建脚本的全部输出（含 CJK 基础字体的下载日志）
+      # sitecustomize 补丁会在归档前为 CN 字体补 U+F900（Emacs :script 'han 代表字超集）
       - name: 🏗️ Build static fonts
         if: steps.meta.outputs.skip != 'true'
         env:
@@ -211,6 +324,7 @@ jobs:
       # 第二次构建：CJK 输出为可变字体（--cache 复用第一次的拉丁基础产物）
       # 注：--cache 下第二次仍会归档复用的静态产物（与 dist/static/ 同名），
       # 同名 zip 必须跳过，否则 gh release create 会因 ReleaseAsset.name 重复报 422
+      # sitecustomize 补丁同样在第二次归档前生效（幂等：已含 U+F900 的字体跳过）
       - name: 🧩 Build variable CJK fonts
         if: steps.meta.outputs.skip != 'true'
         env:
@@ -236,6 +350,7 @@ jobs:
             exit 1
           fi
           echo "::endgroup::"
+
 
       # 在 Actions Summary 页生成中文摘要：上游信息 + 产物清单；构建参数折叠（默认不占版面）
       - name: 📝 Write job summary

@@ -60,6 +60,14 @@ variable/                    第二次构建（中文可变）
 
 > 基于 `--nf-variable`，NF 家族会以可变字体形式产出（而非 8 字重静态组合）；实际命名以首次运行后的产物清单为准。
 
+> 构建期（归档前）会对 fonts/ 下所有 CN 字体的 cmap 自动补 `U+F900 → 与 U+4E92（互）相同的字形`。
+> 这是 CJK 兼容表意文字的标准统一关系，不新增轮廓。目的：macOS 的 Emacs (macfont 后端)
+> 对 script `han` 的字体匹配要求 charset 为代表字超集（U+3410/U+4E10/U+5B57/U+FE30/U+F900），
+> 上游 CN 构建缺 U+F900，导致 `find-font (:script 'han)` 对任何中文字体都失败、
+> fontset 回退异常（中文落到系统字体）。补齐后 `:script 'han` / `cjk-misc` 均可正常命中。
+> 若 Emacs 侧仍遇启动时序导致的回退异常，另需在配置中显式绑定：
+> `(set-fontset-font t 'han (font-spec :family "Maple Mono NFM CN") nil 'prepend)`。
+
 > 压缩包文件名以上游实际输出为准，`--archive` 打包时自动附上 config 与 license。
 
 ## 调整配置
