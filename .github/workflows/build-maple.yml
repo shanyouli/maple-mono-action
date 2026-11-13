@@ -10,7 +10,7 @@
 #
 # 其它已选配置：
 #   --format ttf     仅输出 ttf（可变 base 除外）
-#   --line-height 0.886  行高对齐 LXGW WenKai Mono（1.170em vs 默认 1.32em）
+#   --line-height 0.85  因原始 Maple 1.32em 行距偏大、希望接近偏好的四款字体，按其垂直度量中心值选取
 #   --feat cv02,...   冻结 Playground 实测选定的字形与连字特性
 #   --nf-mono         Nerd Font 图标强制单宽，终端列对齐不被双宽图标破坏
 #   --nf-variable     NF 以可变字体输出（替代 8 字重 x 2 的静态组合）
@@ -43,17 +43,17 @@ concurrency:
 
 env:
   UPSTREAM_REPO: subframe7536/maple-font
-  # 运行时补丁目录（由「🩹 Runtime patch」步骤生成）。
-  # 补丁自带开关判断，只有显式设置 MAPLE_NR_PATCH=1 的步骤才会生效（pip 等进程不受影响）。
-  PYTHONPATH: ${{ github.workspace }}/.patch
-  # 公共构建参数：4 种组合 + 仅 ttf + narrow 宽度 + 行高对齐 LXGW WenKai + Playground 选定的特性冻结
+  # 正式补丁位于本仓库 patches/，CI 将本仓库稀疏检出到上游源码内的 .maple-custom/。
+  # 补丁仅在显式设置 MAPLE_NR_PATCH=1 时启用，pip 等其它 Python 进程不受影响。
+  PYTHONPATH: ${{ github.workspace }}/.maple-custom/patches
+  # 公共构建参数：4 种组合 + 仅 ttf + narrow 宽度 + 多字体行高中心值 + Playground 选定的特性冻结
   # 注：--nf-variable 只能放在第二遍（上游要求 NF 可变必须与 cjk.variable 同遍）
   BUILD_ARGS: >-
     --cjk cn --cjk-both --nf --nf-mono
     --legacy-thin-weight-class
     --width narrow
     --format ttf
-    --line-height 0.886
+    --line-height 0.85
     --feat cv02,cv03,cv05,cv09,cv10,ss03,ss07,ss08,ss09,ss10,ss11
   # 第二遍（可变输出）附加参数：NF 可变 + CJK 可变
   VAR_ARGS: >-
@@ -72,171 +72,14 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # 去掉 family 名中的 NR 后缀：保留 narrow(550) 宽度，但字体名为 Maple Mono / NF / CN / NF CN
-      # 做法是运行时给 BuildConfigResolver._apply_identity 包一层，不改上游任何文件：
-      #   family 名在解析期就已干净，因此 name 表 / fvar 实例名 / 输出文件名 / 包内 config.json 天然一致。
-      # 只依赖方法名与 identity 字段，不依赖上游语句顺序与缩进；上游若重构该方法会立即失败提醒更新。
-      # 注意：不能把 get_width_name() 打成返回 None —— 它同时决定字形宽度（550 vs 600）。
-      - name: "🩹 Runtime patch (drop NR suffix)"
-        run: |
-          mkdir -p .patch
-          cat > .patch/sitecustomize.py << 'PY'
-          """构建期运行时补丁：去掉窄体家族名里的 NR 后缀，同时保留 narrow(550) 宽度。
-
-          由 .github/workflows/build-maple.yml 生成，只在 MAPLE_NR_PATCH=1 的步骤里生效，
-          因此 pip 等其它 Python 进程完全不受影响。依赖上游 scripts.config.resolver 的内部结构。
-          """
-          import os
-          import sys
-
-          if os.environ.get("MAPLE_NR_PATCH") == "1":
-              root = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
-              if os.path.isfile(os.path.join(root, "build.py")) and root not in sys.path:
-                  sys.path.insert(0, root)
-
-              try:
-                  from scripts.config.resolver import BuildConfigResolver
-              except Exception as error:  # 上游重构后导入失败必须让构建失败，而不是静默产出带 NR 的字体
-                  raise SystemExit(f"[nr-patch] 无法导入上游 resolver，需更新补丁: {error}")
-
-              if not hasattr(BuildConfigResolver, "_apply_identity"):
-                  raise SystemExit(
-                      "[nr-patch] 上游已无 BuildConfigResolver._apply_identity，需更新补丁"
-                  )
-
-              if not getattr(BuildConfigResolver, "_nr_suffix_stripped", False):
-                  _orig_apply_identity = BuildConfigResolver._apply_identity
-
-                  def _apply_identity(self, config):
-                      _orig_apply_identity(self, config)
-                      family_name = config.identity.family_name
-                      if config.feature.width in ("narrow", "slim") and " NR" not in family_name:
-                          # 上游不再追加后缀时触发：说明补丁已过期，应当删除该步骤
-                          raise SystemExit(
-                              "[nr-patch] 上游未再追加 NR 后缀，本补丁已过期，请移除该步骤 "
-                              f"(width={config.feature.width}, family={family_name})"
-                          )
-                      config.identity.family_name = family_name.replace(" NR", "")
-                      config.identity.family_name_compact = (
-                          config.identity.family_name_compact.replace("NR", "")
-                      )
-
-                  BuildConfigResolver._apply_identity = _apply_identity
-                  BuildConfigResolver._nr_suffix_stripped = True
-                  print("[nr-patch] 已在运行时去除 family name 的 NR 后缀", file=sys.stderr)
-
-              # —— CJK 兼容映射补丁 ——
-              # Emacs (macfont 后端) 对 script 'han 的字体匹配要求 charset 为 fontset.el 中
-              # 代表字的超集（U+3410/U+4E10/U+5B57/U+FE30/U+F900，五字全中）。
-              # 上游 CN 构建的 cmap 缺 U+F900（CJK 兼容表意文字，Unicode 定义它与 U+4E92「互」统一），
-              # 导致 find-font (:script 'han) 对任何中文字体都返回 nil、fontset 回退异常。
-              # 在归档前将 U+F900 映射到与 U+4E92 相同的字形（不新增轮廓，仅 cmap 条目）。
-              # 拦截点为 MapleBuildPipeline.archive_outputs：ttf 在 fonts/ 下生成后、打包成 zip 前。
-              # 幂等：已含 U+F900 的字体跳过；--cache 复用产物时同样生效。
-              try:
-                  from scripts.pipeline.orchestrator import MapleBuildPipeline
-              except Exception as error:
-                  raise SystemExit(
-                      f"[cjk-compat] 无法导入上游 orchestrator，需更新补丁: {error}"
-                  )
-
-              if not hasattr(MapleBuildPipeline, "archive_outputs"):
-                  raise SystemExit(
-                      "[cjk-compat] 上游已无 MapleBuildPipeline.archive_outputs，需更新补丁"
-                  )
-
-              if not getattr(MapleBuildPipeline, "_cjk_compat_patched", False):
-                  def _patch_cjk_compat_fonts(output_dir):
-                      """先探测后补丁：仅当字体缺失代表字且可补时才修改。
-
-                      上游版本更新若自行补全（无论补 cmap 还是其它机制使代表字
-                      覆盖满足），此处自动退化为 no-op，不会干扰上游修复。
-                      """
-                      from pathlib import Path
-                      from fontTools.ttLib import TTFont
-
-                      representatives = (0x3410, 0x4E10, 0x5B57, 0xFE30, 0xF900)
-                      compat = 0xF900
-                      same_as = 0x4E92  # 互
-                      standard_subtables = ((0, 3), (0, 4), (3, 1), (3, 10))
-                      patched, already_ok, unfixable = 0, 0, []
-                      for path in Path(output_dir).rglob("*.ttf"):
-                          # 只处理 CN 家族（静态 MapleMono-CN/NFM-CN-* 与可变 *[wght].ttf）
-                          if "CN" not in path.stem:
-                              continue
-                          font = TTFont(str(path))
-                          try:
-                              best = font.getBestCmap()
-                              missing = [c for c in representatives if c not in best]
-                              if not missing:
-                                  # 上游已支持：不做任何修改
-                                  already_ok += 1
-                                  continue
-                              if compat in missing and same_as not in best:
-                                  # 无法补齐（缺同形参照）：不阻断构建，待上游修复
-                                  unfixable.append(path.name)
-                                  continue
-                              glyph = best[same_as]
-                              touched = []
-                              for st in font["cmap"].tables:
-                                  if (st.platformID, st.platEncID) in standard_subtables \
-                                          and compat not in st.cmap:
-                                      st.cmap[compat] = glyph
-                                      touched.append(
-                                          (st.platformID, st.platEncID, st.format)
-                                      )
-                              # 自检（内存对象即最终落盘内容）
-                              best_after = font.getBestCmap()
-                              still_missing = [
-                                  c for c in representatives if c not in best_after
-                              ]
-                              if still_missing:
-                                  raise SystemExit(
-                                      "[cjk-compat] 自检失败: "
-                                      + ", ".join(
-                                          f"U+{c:04X}" for c in still_missing
-                                      )
-                                  )
-                              font.save(str(path))
-                              patched += 1
-                              print(
-                                  f"[cjk-compat] {path.name}: "
-                                  f"cmap[U+F900] -> {glyph!r} on {touched}",
-                                  file=sys.stderr,
-                              )
-                          finally:
-                              font.close()
-                      if already_ok:
-                          print(
-                              f"[cjk-compat] {already_ok} 个 CN 字体已覆盖全部代表字"
-                              "（上游已修复），跳过",
-                              file=sys.stderr,
-                          )
-                      for name in unfixable:
-                          print(
-                              f"[cjk-compat] 警告: {name} 缺同形参照 U+{same_as:04X}，"
-                              "无法补 U+F900，已跳过（待上游版本修复）",
-                              file=sys.stderr,
-                          )
-                      if patched:
-                          print(
-                              f"[cjk-compat] 归档前已为 {patched} 个 CN 字体补 U+F900",
-                              file=sys.stderr,
-                          )
-
-                  _orig_archive_outputs = MapleBuildPipeline.archive_outputs
-
-                  def _archive_with_cjk_compat(self):
-                      _patch_cjk_compat_fonts(self.runtime_context.output_dir)
-                      _orig_archive_outputs(self)
-
-                  MapleBuildPipeline.archive_outputs = _archive_with_cjk_compat
-                  MapleBuildPipeline._cjk_compat_patched = True
-                  print(
-                      "[cjk-compat] 已挂接归档钩子：归档前为 CN 字体补 U+F900",
-                      file=sys.stderr,
-                  )
-          PY
+      - name: 📥 Checkout build customizations
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .maple-custom
+          sparse-checkout: patches
+          persist-credentials: false
 
       - name: 🐍 Setup Python
         uses: actions/setup-python@v6
@@ -245,11 +88,38 @@ jobs:
           cache: 'pip'
           cache-dependency-path: 'requirements.txt'
 
+      - name: "🩹 Validate runtime patch"
+        run: |
+          PATCH="$GITHUB_WORKSPACE/.maple-custom/patches/sitecustomize.py"
+          if [ ! -f "$PATCH" ]; then
+            MESSAGE="patches/sitecustomize.py 缺失，需要恢复或更新 runtime patch 后重试"
+            echo "::error::$MESSAGE"
+            echo "## Runtime patch 需要更新" >> "$GITHUB_STEP_SUMMARY"
+            echo "$MESSAGE" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! python -m py_compile "$PATCH"; then
+            MESSAGE="patches/sitecustomize.py 语法检查失败，需要更新 runtime patch 后重试"
+            echo "::error::$MESSAGE"
+            echo "## Runtime patch 需要更新" >> "$GITHUB_STEP_SUMMARY"
+            echo "$MESSAGE" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
       - name: 📦 Install dependencies
         run: |
           echo "::group::📦 pip install -r requirements.txt"
           pip install -r requirements.txt
           echo "::endgroup::"
+
+      # 先确认补丁已加载，再 dry-run 两遍配置，验证上游挂接点与实际命名解析；此步骤不生成字体。
+      - name: "🩺 Preflight runtime patch"
+        env:
+          MAPLE_NR_PATCH: '1'
+        run: |
+          python -c 'import sitecustomize; assert sitecustomize.PATCH_INSTALLED, "runtime patch 未启用"'
+          python build.py ${{ env.BUILD_ARGS }} --archive --dry
+          python build.py ${{ env.BUILD_ARGS }} ${{ env.VAR_ARGS }} --archive --cache --dry
 
       - name: 🏷️ Resolve build metadata
         id: meta
